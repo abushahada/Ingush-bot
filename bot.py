@@ -11,7 +11,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
@@ -31,54 +30,62 @@ def translate(text: str) -> str:
     return response.choices[0].message.content.strip()
 
 
-async def send_message(chat_id: int, text: str):
-    async with httpx.AsyncClient() as client:
-        await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+async def send_message(client: httpx.AsyncClient, chat_id: int, text: str):
+    await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
-async def handle_update(update: dict):
-    message = update.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "")
-
-    if not chat_id or not text:
-        return
-
-    if text == "/start":
-        reply = (
-            "🌄 Bienvenue sur le bot de traduction ingouche!\n\n"
-            "Envoie n'importe quel texte en français, russe ou ingouche et je le traduirai.\n\n"
-            "Exemples :\n"
-            "• 'Bonjour' → traduction en ingouche\n"
-            "• 'нана' → traduction en russe/français\n"
-            "• 'маьрша хиллалц' → traduction\n\n"
-            "ГIалгIай мотт — Langue ingouche 🏔"
-        )
-    else:
-        try:
-            await send_message(chat_id, "⏳ Traduction en cours...")
-            reply = translate(text)
-        except Exception as e:
-            logger.error(f"Erreur traduction: {e}")
-            reply = "❌ Erreur de traduction. Réessaie."
-
-    await send_message(chat_id, reply)
+async def get_updates(client: httpx.AsyncClient, offset: int):
+    resp = await client.get(
+        f"{TELEGRAM_API}/getUpdates",
+        params={"offset": offset, "timeout": 30},
+        timeout=40,
+    )
+    return resp.json()
 
 
 async def poll():
-    offset = 0
-    logger.info("Bot démarré, en attente de messages...")
-    async with httpx.AsyncClient(timeout=60) as client:
+    # D'abord vider la file des anciens messages
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{TELEGRAM_API}/getUpdates", params={"offset": -1, "timeout": 0}, timeout=10)
+        data = resp.json()
+        results = data.get("result", [])
+        offset = (results[-1]["update_id"] + 1) if results else 0
+        logger.info(f"Bot démarré, offset initial: {offset}")
+
         while True:
             try:
-                resp = await client.get(
-                    f"{TELEGRAM_API}/getUpdates",
-                    params={"offset": offset, "timeout": 30},
-                )
-                data = resp.json()
+                data = await get_updates(client, offset)
                 for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-                    await handle_update(update)
+                    update_id = update["update_id"]
+                    offset = update_id + 1
+                    logger.info(f"Nouveau message reçu! update_id={update_id}")
+
+                    message = update.get("message", {})
+                    chat_id = message.get("chat", {}).get("id")
+                    text = message.get("text", "")
+
+                    if not chat_id or not text:
+                        continue
+
+                    logger.info(f"Message de {chat_id}: {text}")
+
+                    if text.startswith("/start"):
+                        reply = (
+                            "🌄 Bienvenue sur le bot de traduction ingouche!\n\n"
+                            "Envoie n'importe quel texte en français, russe ou ingouche.\n\n"
+                            "ГIалгIай мотт 🏔"
+                        )
+                    else:
+                        await send_message(client, chat_id, "⏳ Traduction en cours...")
+                        try:
+                            reply = translate(text)
+                        except Exception as e:
+                            logger.error(f"Erreur traduction: {e}")
+                            reply = "❌ Erreur. Réessaie."
+
+                    await send_message(client, chat_id, reply)
+                    logger.info(f"Réponse envoyée: {reply[:50]}")
+
             except Exception as e:
                 logger.error(f"Erreur polling: {e}")
                 await asyncio.sleep(5)
